@@ -1,27 +1,41 @@
 name: Update Worker Stats
+
 on:
   schedule:
     - cron: '0 */1 * * *'
   workflow_dispatch:
+
 permissions:
-  contents: write
+  contents: read
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      PAGES_PROJECT: cf-usage-stats
+      PAGES_URL: https://cf-usage-stats.pages.dev
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
-      # ✅ 新增：从 gh-pages 分支恢复旧的 data.json
-      - name: Restore data.json from gh-pages
+      # 原版从 gh-pages 分支恢复 data.json；改用 Cloudflare Pages 后没有该分支，
+      # 改为从已部署站点拉回上一次的数据。public/_headers 已为 /data.json 设 no-store，
+      # 保证 curl 拿到的是最新版本，fetch-data.js 的 3 天增量合并逻辑因此继续有效。
+      - name: Restore history from deployed site
         run: |
-          git fetch origin gh-pages
-          git checkout origin/gh-pages -- data.json && mv data.json public/data.json || echo "No existing data.json found, starting fresh"
+          mkdir -p public
+          if curl -fsSL "${PAGES_URL}/data.json?t=$(date +%s)" -o /tmp/prev.json \
+             && node -e "JSON.parse(require('fs').readFileSync('/tmp/prev.json','utf8'))"; then
+            cp /tmp/prev.json public/data.json
+            echo "Restored previous data.json"
+          else
+            echo "No valid previous data (first run), starting fresh"
+          fi
 
       - name: Setup Node.js
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Install dependencies
         run: npm install
@@ -33,9 +47,18 @@ jobs:
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
           CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v3
+      # 首次运行自动创建 Direct Upload 项目；已存在时报错可忽略
+      - name: Ensure Pages project exists
+        uses: cloudflare/wrangler-action@v4
+        continue-on-error: true
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public
-          cname: workers-usage.265209.xyz
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages project create ${{ env.PAGES_PROJECT }} --production-branch=main
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          command: pages deploy ./public --project-name=${{ env.PAGES_PROJECT }} --branch=main
